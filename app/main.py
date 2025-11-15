@@ -1,11 +1,19 @@
 # Importaciones necesarias
-from fastapi import FastAPI, Depends
-from sqlalchemy.orm import Session
+import io
+import json
+import asyncio
+import pandas as pd 
+import openpyxl
+from typing import List, Dict, Any
 from fastapi.middleware.cors import CORSMiddleware
 from database import SessionLocal, engine, Base
 from models import Product
 from utils.response import build_response
 from schemas import ProductCreate, ProductOut
+from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, WebSocket, WebSocketDisconnect
+from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session as OrmSession
 from crud import (
     create_product,
     get_products,
@@ -203,3 +211,589 @@ def delete_product_endpoint(product_id: int, db: Session = Depends(get_db)):
             message="No se pudo eliminar el producto",
             error=str(e)
         )
+        
+        
+class ConnectionManager:
+    """Gestiona las conexiones WebSocket activas"""
+    
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+    
+    async def connect(self, websocket: WebSocket):
+        """Acepta y registra una nueva conexión"""
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        print(f"✓ WebSocket conectado. Total conexiones: {len(self.active_connections)}")
+    
+    def disconnect(self, websocket: WebSocket):
+        """Elimina una conexión cuando se desconecta"""
+        self.active_connections.remove(websocket)
+        print(f"✗ WebSocket desconectado. Total conexiones: {len(self.active_connections)}")
+                
+    async def send_message(self, websocket: WebSocket, message: Dict[str, Any]):
+        """Alias compatible para evitar errores en código anterior"""
+        await websocket.send_json(message)
+
+# Instancia global del gestor
+manager = ConnectionManager()
+
+def is_number(value):
+    try:
+        float(str(value).replace(",", "."))
+        return True
+    except:
+        return False
+
+def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df.columns = (
+        df.columns
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace(r'\s+', '_', regex=True)
+    )
+    return df
+
+def validate_sheet(df: pd.DataFrame, sheet_name: str) -> Dict[str, Any]:
+    """Valida una hoja de Excel"""
+    errors = []
+    required_columns = {"name", "description", "price", "quantity"}
+    
+    # Normalizar columnas
+    df = normalize_columns(df)
+    
+    # Verificar columnas requeridas
+    missing_columns = required_columns - set(df.columns)
+    if missing_columns:
+        errors.append(f"Faltan columnas requeridas: {', '.join(missing_columns)}")
+    
+    # Verificar filas vacías
+    if df.empty:
+        errors.append("La hoja está vacía")
+    
+    if 'price' in df.columns:
+        non_numeric_prices = df[~df['price'].apply(is_number)]
+        if not non_numeric_prices.empty:
+            errors.append(f"Hay {len(non_numeric_prices)} filas con precios inválidos")
+
+    if 'quantity' in df.columns:
+        # Convertir a string de forma segura antes de validar
+        non_numeric_qty = df[~df['quantity'].astype(str).str.isdigit()]
+        if not non_numeric_qty.empty:
+            errors.append(f"Hay {len(non_numeric_qty)} filas con cantidades inválidas")
+    
+    return {
+        "name": sheet_name,
+        "rows": len(df),
+        "columns": list(df.columns),
+        "is_valid": len(errors) == 0,
+        "errors": errors
+    }
+    
+def process_excel_file(contents: bytes) -> Dict[str, Any]:
+    """Procesa archivo Excel y retorna información de hojas"""
+    try:
+        excel_file = io.BytesIO(contents)
+        excel_data = pd.ExcelFile(excel_file, engine='openpyxl')
+        
+        sheets_info = []
+        valid_sheets = []
+        
+        for sheet_name in excel_data.sheet_names:
+            df = pd.read_excel(excel_data, sheet_name=sheet_name)
+            validation = validate_sheet(df, sheet_name)
+            sheets_info.append(validation)
+            
+            if validation['is_valid']:
+                valid_sheets.append(sheet_name)
+        
+        # Si solo hay una hoja válida, seleccionarla automáticamente
+        selected_sheet = valid_sheets[0] if len(valid_sheets) == 1 else None
+        
+        return {
+            "sheets": sheets_info,
+            "selected_sheet": selected_sheet,
+            "total_sheets": len(excel_data.sheet_names),
+            "valid_sheets": valid_sheets
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error procesando Excel: {str(e)}")
+
+@app.post("/upload-excel/analyze")
+async def analyze_excel(file: UploadFile = File(...)):
+    """Analiza el archivo Excel y retorna información de las hojas"""
+    
+    # Validar extensión
+    if not file.filename.endswith(('.xls', '.xlsx')):
+        raise HTTPException(status_code=400, detail="El archivo debe ser .xls o .xlsx")
+    
+    # Validar tamaño (10MB)
+    contents = await file.read()
+    max_size = 10 * 1024 * 1024
+    file_size_mb = len(contents) / (1024 * 1024)
+    
+    if len(contents) > max_size:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"El archivo excede el límite de 10 MB (tamaño: {file_size_mb:.2f} MB)"
+        )
+    
+    # Procesar y analizar hojas
+    analysis = process_excel_file(contents)
+    
+    return {
+        "success": True,
+        "data": analysis,
+        "file_size_mb": round(file_size_mb, 2)
+    }
+
+@app.post("/upload-excel/preview")
+async def preview_excel(file: UploadFile = File(...), sheet_name: str = None):
+    """Genera vista previa de la hoja seleccionada"""
+    
+    contents = await file.read()
+    excel_file = io.BytesIO(contents)
+    
+    try:
+        # Si no se especifica hoja, usar la primera
+        if sheet_name:
+            df = pd.read_excel(excel_file, sheet_name=sheet_name, engine='openpyxl')
+        else:
+            df = pd.read_excel(excel_file, engine='openpyxl')
+        
+        # Normalizar columnas
+        df = normalize_columns(df)
+        
+        # Agregar ID temporal para referencia
+        df.insert(0, 'temp_id', range(1, len(df) + 1))
+        
+        # Convertir a formato JSON serializable
+        preview_data = df.head(100).to_dict('records')  # Mostrar primeras 100 filas
+        
+        # Limpiar valores NaN
+        for row in preview_data:
+            for key, value in row.items():
+                if pd.isna(value):
+                    row[key] = None
+        
+        return {
+            "success": True,
+            "data": {
+                "preview_rows": preview_data,
+                "total_rows": len(df),
+                "columns": list(df.columns)
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error generando vista previa: {str(e)}")
+
+# ========================================
+# WEBSOCKET PARA CARGA EN TIEMPO REAL
+# ========================================
+
+@app.websocket("/ws/upload")
+async def websocket_upload(websocket: WebSocket):
+    await manager.connect(websocket)
+    
+    try:
+        while True:
+            # Recibir datos del cliente
+            data = await websocket.receive_json()
+            action = data.get('action')
+            
+            if action == 'start_upload':
+                await process_upload(websocket, data)
+            elif action == 'ping':
+                await manager.send_message(websocket, {"type": "pong"})
+            
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+    except Exception as e:
+        print(f"Error en WebSocket: {e}")
+        await manager.send_message(websocket, {
+            "type": "error",
+            "message": f"Error en la conexión: {str(e)}"
+        })
+        manager.disconnect(websocket)
+
+async def process_upload(websocket: WebSocket, data: dict):
+    """Procesa la carga de datos con notificaciones en tiempo real Y GUARDADO EN BD"""
+    
+    rows = data.get('rows', [])
+    total_rows = len(rows)
+    
+    if total_rows == 0:
+        await manager.send_message(websocket, {
+            "type": "error",
+            "message": "No hay datos para procesar"
+        })
+        return
+    
+    # Obtener sesión de base de datos
+    db = SessionLocal()
+    
+    try:
+        # Notificar inicio
+        await manager.send_message(websocket, {
+            "type": "progress",
+            "step": "start",
+            "progress": 0,
+            "message": f"Iniciando carga de {total_rows} productos"
+        })
+        
+        await asyncio.sleep(0.5)
+        
+        # Simular validación
+        await manager.send_message(websocket, {
+            "type": "progress",
+            "step": "validating",
+            "progress": 10,
+            "message": "Validando datos..."
+        })
+        
+        await asyncio.sleep(0.5)
+        
+        # Procesar por lotes
+        batch_size = 10
+        created = 0
+        updated = 0
+        errors = []
+        
+        for i in range(0, total_rows, batch_size):
+            batch = rows[i:i + batch_size]
+            
+            for idx, row in enumerate(batch):
+                try:
+                    # Validaciones básicas
+                    name = str(row.get('name', '')).strip()
+                    description = str(row.get('description', '')).strip()
+                    
+                    if not name:
+                        errors.append(f"Fila {i+idx+1}: Nombre vacío")
+                        continue
+                    
+                    if not description:
+                        errors.append(f"Fila {i+idx+1}: Descripción vacía")
+                        continue
+                    
+                    try:
+                        price = float(row.get('price', 0))
+                        if price < 0:
+                            errors.append(f"Fila {i+idx+1}: Precio negativo")
+                            continue
+                    except (ValueError, TypeError):
+                        errors.append(f"Fila {i+idx+1}: Precio inválido")
+                        continue
+                    
+                    try:
+                        quantity = int(row.get('quantity', 0))
+                        if quantity < 0:
+                            errors.append(f"Fila {i+idx+1}: Cantidad negativa")
+                            continue
+                    except (ValueError, TypeError):
+                        errors.append(f"Fila {i+idx+1}: Cantidad inválida")
+                        continue
+                    
+                    # ✅ AQUÍ GUARDAMOS EN LA BASE DE DATOS
+                    product_id = row.get('id')
+                    
+                    if product_id:
+                        # Intentar actualizar producto existente
+                        try:
+                            product_id = int(product_id)
+                            product = db.query(Product).filter(Product.id == product_id).first()
+                            
+                            if product:
+                                # Actualizar producto existente
+                                product.name = name
+                                product.description = description
+                                product.price = price
+                                product.quantity = quantity
+                                updated += 1
+                                print(f"✓ Producto ID {product_id} actualizado: {name}")
+                            else:
+                                # Crear nuevo si el ID no existe
+                                new_product = Product(
+                                    name=name,
+                                    description=description,
+                                    price=price,
+                                    quantity=quantity
+                                )
+                                db.add(new_product)
+                                created += 1
+                                print(f"✓ Producto creado: {name} (ID {product_id} no existía)")
+                        except ValueError:
+                            errors.append(f"Fila {i+idx+1}: ID inválido")
+                            continue
+                    else:
+                        # Crear nuevo producto
+                        new_product = Product(
+                            name=name,
+                            description=description,
+                            price=price,
+                            quantity=quantity
+                        )
+                        db.add(new_product)
+                        created += 1
+                        print(f"✓ Producto creado: {name}")
+                    
+                    # Hacer commit cada 10 productos para mayor eficiencia
+                    if (created + updated) % 10 == 0:
+                        db.commit()
+                        print(f"💾 Guardados {created + updated} productos hasta ahora")
+                    
+                except Exception as e:
+                    errors.append(f"Fila {i+idx+1}: {str(e)}")
+                    print(f"❌ Error en fila {i+idx+1}: {str(e)}")
+                    continue
+            
+            # Commit del lote actual
+            db.commit()
+            
+            # Notificar progreso del lote
+            progress = min(10 + int((i + batch_size) / total_rows * 80), 90)
+            await manager.send_message(websocket, {
+                "type": "progress",
+                "step": "processing",
+                "progress": progress,
+                "message": f"Procesadas {min(i + batch_size, total_rows)} de {total_rows} filas",
+                "data": {
+                    "created": created,
+                    "updated": updated,
+                    "errors": len(errors)
+                }
+            })
+        
+        # Commit final para asegurar que todo se guardó
+        db.commit()
+        print(f"✅ Proceso completado: {created} creados, {updated} actualizados")
+        
+        # Finalizar
+        await manager.send_message(websocket, {
+            "type": "progress",
+            "step": "saving",
+            "progress": 95,
+            "message": "Guardando cambios en la base de datos..."
+        })
+        
+        await asyncio.sleep(0.5)
+        
+        # Resultado final
+        await manager.send_message(websocket, {
+            "type": "complete",
+            "step": "complete",
+            "progress": 100,
+            "message": "¡Carga completada exitosamente!",
+            "data": {
+                "total_rows": total_rows,
+                "created": created,
+                "updated": updated,
+                "errors_count": len(errors),
+                "errors": errors[:10]  # Primeros 10 errores
+            }
+        })
+    
+    except Exception as e:
+        db.rollback()
+        print(f"❌ Error general en process_upload: {str(e)}")
+        await manager.send_message(websocket, {
+            "type": "error",
+            "message": f"Error procesando datos: {str(e)}"
+        })
+    
+    finally:
+        db.close()
+        print("🔒 Sesión de base de datos cerrada")
+      
+# @app.websocket("/ws/upload-progress")
+# async def websocket_endpoint(websocket: WebSocket):
+#     await websocket.accept()
+#     try:
+#         while True:
+#             data = await websocket.receive_text()
+#             print(f"Mensaje recibido del cliente: {data}")
+#             await websocket.send_json({"message": f"Mensaje recibido del cliente: {data}"})
+#     except WebSocketDisconnect:
+#         print("Cliente desconectado")
+
+# ========================================
+# ENDPOINT UPLOAD EXCEL CON NOTIFICACIONES WEBSOCKET
+# ========================================
+
+# @app.post("/upload-excel-ws/")
+# async def upload_excel_websocket(file: UploadFile = File(...), db: Session = Depends(get_db)):
+#     """
+#     Endpoint para subir archivo Excel y enviar progreso vía WebSocket
+#     """
+    
+#     async def send_update(step: str, progress: int, message: str, data: dict = None):
+#         await manager.send_progress({
+#             "step": step,
+#             "progress": progress,
+#             "message": message,
+#             "data": data or {}
+#         })
+    
+#     try:
+#         await send_update("start", 0, f"Iniciando carga de {file.filename}")
+        
+#         # Validación extensión
+#         if not file.filename.endswith(('.xls', '.xlsx')):
+#             await send_update("error", 0, "Formato de archivo inválido")
+#             raise HTTPException(status_code=400, detail="El archivo debe ser .xls o .xlsx")
+#         await send_update("validation", 10, "Extensión válida")
+        
+#         # Validación tamaño
+#         contents = await file.read()
+#         max_size = 10 * 1024 * 1024
+#         file_size_mb = len(contents) / (1024 * 1024)
+#         if len(contents) > max_size:
+#             await send_update("error", 0, f"Archivo demasiado grande: {file_size_mb:.2f} MB")
+#             raise HTTPException(status_code=400, detail=f"El archivo supera el límite de 10 MB")
+#         await send_update("validation", 20, f"Tamaño válido: {file_size_mb:.2f} MB")
+        
+#         # Leer Excel
+#         try:
+#             excel_data = io.BytesIO(contents)
+#             df = pd.read_excel(excel_data, engine='openpyxl')
+#             await send_update("reading", 30, f"Excel cargado: {len(df)} filas encontradas")
+#         except Exception as e:
+#             await send_update("error", 0, f"Error leyendo Excel: {str(e)}")
+#             raise HTTPException(status_code=400, detail=f"Error leyendo archivo: {str(e)}")
+        
+#         # Normalizar columnas
+#         df.columns = df.columns.str.strip().str.lower()
+#         await send_update("processing", 40, "Columnas normalizadas")
+        
+#         # Verificar columnas requeridas
+#         required_columns = {"name", "description", "price", "quantity"}
+#         missing_columns = required_columns - set(df.columns)
+#         if missing_columns:
+#             await send_update("error", 0, f"Faltan columnas: {', '.join(missing_columns)}")
+#             raise HTTPException(status_code=400, detail=f"Faltan columnas requeridas: {', '.join(missing_columns)}")
+#         await send_update("processing", 50, "Estructura validada correctamente")
+        
+#         # Validar Excel vacío
+#         if df.empty:
+#             await send_update("error", 0, "El archivo Excel está vacío")
+#             raise HTTPException(status_code=400, detail="El archivo Excel está vacío")
+        
+#         # Procesar filas con notificación de progreso
+#         productos_creados = 0
+#         productos_actualizados = 0
+#         filas_con_error = []
+#         total_filas = len(df)
+        
+#         for idx, row in df.iterrows():
+#             progress = 50 + int((idx / total_filas) * 40)
+#             try:
+#                 data = row.to_dict()
+#                 # Validaciones
+#                 if pd.isna(data['name']) or str(data['name']).strip() == '':
+#                     filas_con_error.append(f"Fila {idx + 2}: nombre vacío")
+#                     continue
+#                 if pd.isna(data['description']) or str(data['description']).strip() == '':
+#                     filas_con_error.append(f"Fila {idx + 2}: descripción vacía")
+#                     continue
+#                 try:
+#                     price = float(data['price'])
+#                     if price < 0:
+#                         filas_con_error.append(f"Fila {idx + 2}: precio negativo")
+#                         continue
+#                 except (ValueError, TypeError):
+#                     filas_con_error.append(f"Fila {idx + 2}: precio inválido")
+#                     continue
+#                 try:
+#                     quantity = int(data['quantity'])
+#                     if quantity < 0:
+#                         filas_con_error.append(f"Fila {idx + 2}: cantidad negativa")
+#                         continue
+#                 except (ValueError, TypeError):
+#                     filas_con_error.append(f"Fila {idx + 2}: cantidad inválida")
+#                     continue
+                
+#                 name = str(data['name']).strip()
+#                 description = str(data['description']).strip()
+                
+#                 # Crear o actualizar producto
+#                 if 'id' in data and pd.notna(data['id']):
+#                     product_id = int(data['id'])
+#                     product = db.query(Product).filter(Product.id == product_id).first()
+#                     if product:
+#                         product.name = name
+#                         product.description = description
+#                         product.price = price
+#                         product.quantity = quantity
+#                         productos_actualizados += 1
+#                     else:
+#                         nuevo = Product(name=name, description=description, price=price, quantity=quantity)
+#                         db.add(nuevo)
+#                         productos_creados += 1
+#                 else:
+#                     nuevo = Product(name=name, description=description, price=price, quantity=quantity)
+#                     db.add(nuevo)
+#                     productos_creados += 1
+                
+#                 # Enviar actualización cada 5 filas
+#                 if (idx + 1) % 5 == 0:
+#                     await send_update(
+#                         "processing",
+#                         progress,
+#                         f"Procesando fila {idx + 1} de {total_filas}",
+#                         {
+#                             "creados": productos_creados,
+#                             "actualizados": productos_actualizados,
+#                             "errores": len(filas_con_error)
+#                         }
+#                     )
+#             except Exception as e:
+#                 filas_con_error.append(f"Fila {idx + 2}: {str(e)}")
+#                 continue
+        
+#         await send_update("saving", 90, "Guardando cambios en la base de datos...")
+#         db.commit()
+        
+#         response_data = {
+#             "message": "Proceso completado exitosamente",
+#             "total_filas": total_filas,
+#             "productos_creados": productos_creados,
+#             "productos_actualizados": productos_actualizados,
+#             "filas_con_error": len(filas_con_error),
+#             "errores": filas_con_error[:10] if filas_con_error else []
+#         }
+        
+#         await send_update("complete", 100, "¡Carga completada!", response_data)
+        
+#         return JSONResponse(content=response_data)
+    
+#     except HTTPException as he:
+#         raise he
+#     except Exception as e:
+#         await send_update("error", 0, f"Error inesperado: {str(e)}")
+#         db.rollback()
+#         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+# ========================================
+# ENDPOINT DE PRUEBA WEBSOCKET
+# ========================================
+
+# @app.get("/test-ws")
+# async def test_websocket():
+#     """
+#     Endpoint de prueba para verificar que WebSocket funciona
+#     """
+#     await manager.send_progress({
+#         "step": "test",
+#         "progress": 50,
+#         "message": "Mensaje de prueba desde el servidor",
+#         "data": {"timestamp": "2025-11-13"}
+#     })
+#     return {"message": "Mensaje de prueba enviado a todos los clientes conectados"}
+
+@app.get("/")
+async def root():
+    return {"message": "Bienvenido a mi API"}
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}

@@ -4,3 +4,7 @@ sqlalchemy
 pymysql
 python-dotenv
 cryptography
+pandas
+openpyxl
+python-multipart
+websockets

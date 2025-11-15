@@ -1,56 +1,212 @@
+<!-- inventory.component.html - VERSIÓN INTEGRADA -->
 <div class="container">
-  <h2>Inventario de Productos</h2>
+  <h2>📦 Inventario de Productos</h2>
 
+  <!-- Formulario de Agregar Producto -->
   <form (ngSubmit)="addItem()" class="form">
-    <input
-      [(ngModel)]="newItem.name"
-      name="name"
-      placeholder="Nombre del producto"
-      required
-    />
-    <input
-      [(ngModel)]="newItem.description"
-      name="description"
-      placeholder="Descripción"
-      required
-    />
-    <input
-      [(ngModel)]="newItem.price"
-      name="price"
-      type="number"
-      placeholder="Precio"
-      required
-    />
-    <input
-      [(ngModel)]="newItem.quantity"
-      name="quantity"
-      type="number"
-      placeholder="Cantidad"
-      required
-    />
-    <button type="submit">Agregar Producto</button>
+    <input [(ngModel)]="newItem.name" name="name" placeholder="Nombre del producto" required />
+    <input [(ngModel)]="newItem.description" name="description" placeholder="Descripción" required />
+    <input [(ngModel)]="newItem.price" name="price" type="number" placeholder="Precio" required />
+    <input [(ngModel)]="newItem.quantity" name="quantity" type="number" placeholder="Cantidad" required />
+    <button type="submit" class="btn-add">➕ Agregar</button>
+    <button type="button" class="btn-excel" (click)="openExcelUploader()">
+      📊 Carga Masiva Excel
+    </button>
   </form>
+
+  <!-- Barra de Búsqueda -->
   <div class="search-bar">
-    <input
-      name="search"
-      [(ngModel)]="searchTerm"
-      placeholder="Buscar producto..."
-    />
+    <input name="search" [(ngModel)]="searchTerm" placeholder="🔍 Buscar producto..." />
     <button type="button" (click)="applyFilter()">Buscar</button>
   </div>
 
+  <!-- Lista de Productos -->
   <ul class="item-list">
     <li *ngFor="let item of paginatedItems">
-      <strong>{{ item.name }}</strong> - {{ item.description }}
-      <br>
-      Precio: ${{ item.price }} | Cantidad: {{ item.quantity }}
-      <button (click)="deleteItem(item.id)" style="margin-left: 10px;">Eliminar</button>
+      <div class="item-content">
+        <div class="item-info">
+          <strong>{{ item.name }}</strong>
+          <span class="item-description">{{ item.description }}</span>
+        </div>
+        <div class="item-details">
+          <span class="item-price">💰 ${{ item.price }}</span>
+          <span class="item-quantity">📦 {{ item.quantity }}</span>
+        </div>
+      </div>
+      <button class="btn-delete" (click)="deleteItem(item.id)">🗑️</button>
     </li>
   </ul>
-<div class="pagination">
-  <button (click)="prevPage()" [disabled]="currentPage === 1">Anterior</button>
-  <span>Página {{currentPage}} de {{totalPages()}}</span>
-  <button (click)="nextPage()" [disabled]="currentPage === totalPages()">Siguiente</button>
+
+  <!-- Paginación -->
+  <div class="pagination">
+    <button (click)="prevPage()" [disabled]="currentPage === 1">⬅️ Anterior</button>
+    <span>Página {{currentPage}} de {{totalPages()}}</span>
+    <button (click)="nextPage()" [disabled]="currentPage === totalPages()">Siguiente ➡️</button>
+  </div>
 </div>
 
+<!-- ========================================
+     MODAL DE CARGA EXCEL
+     ======================================== -->
+<div *ngIf="showExcelModal" class="modal-overlay" (click)="closeExcelModal()">
+  <div class="modal-excel" (click)="$event.stopPropagation()">
+    <!-- Header del Modal -->
+    <div class="modal-excel-header">
+      <h3>📊 Carga Masiva desde Excel</h3>
+      <button class="btn-close-modal" (click)="closeExcelModal()">✕</button>
+    </div>
+
+    <!-- Contenido del Modal -->
+    <div class="modal-excel-body">
+
+      <!-- ERROR GENERAL -->
+      <div *ngIf="generalError" class="alert alert-error">
+        <span class="alert-icon">⚠️</span>
+        <span>{{ generalError }}</span>
+      </div>
+
+      <!-- SELECTOR DE ARCHIVO -->
+      <div *ngIf="!showPreview && !isUploading && !showSheetSelector" class="upload-zone">
+        <input type="file" id="fileInputModal" accept=".xls,.xlsx" (change)="onFileSelected($event)"
+          style="display: none" />
+
+        <label for="fileInputModal" class="upload-area">
+          <div class="upload-icon">📁</div>
+          <p class="upload-text">
+            <strong>Haz clic para seleccionar</strong> o arrastra tu archivo Excel aquí
+          </p>
+          <p class="upload-hint">Formatos: .xls, .xlsx (máx. 10 MB)</p>
+        </label>
+
+        <div *ngIf="fileName" class="file-info">
+          <div class="file-icon">📄</div>
+          <div class="file-details">
+            <p class="file-name">{{ fileName }}</p>
+            <p class="file-size">{{ formatFileSize(fileSize) }}</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- SELECTOR DE HOJAS -->
+      <div *ngIf="showSheetSelector && !showPreview && !isUploading" class="sheet-selector">
+        <h4>Selecciona una hoja para cargar</h4>
+        <p class="sheet-hint">Se detectaron {{ sheets.length }} hojas en el archivo</p>
+
+        <div class="sheets-grid">
+          <div *ngFor="let sheet of sheets" class="sheet-card" [class.sheet-valid]="sheet.is_valid"
+            [class.sheet-invalid]="!sheet.is_valid" (click)="sheet.is_valid && selectSheet(sheet.name)">
+            <div class="sheet-header">
+              <span class="sheet-name">{{ sheet.name }}</span>
+              <span class="sheet-status" [class.status-valid]="sheet.is_valid" [class.status-invalid]="!sheet.is_valid">
+                {{ sheet.is_valid ? '✓' : '✗' }}
+              </span>
+            </div>
+            <div class="sheet-info">
+              <p>{{ sheet.rows }} filas</p>
+              <p>{{ sheet.columns.length }} columnas</p>
+            </div>
+            <div *ngIf="!sheet.is_valid" class="sheet-errors">
+              <p *ngFor="let error of sheet.errors" class="error-item">• {{ error }}</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- VISTA PREVIA -->
+      <div *ngIf="showPreview && !isUploading" class="preview-container">
+        <div class="preview-header">
+          <div>
+            <h4>Vista Previa - {{ selectedSheet }}</h4>
+            <p class="preview-info">Mostrando {{ previewData.length }} de {{ totalRows }} filas</p>
+          </div>
+          <div class="preview-actions">
+            <button class="btn-secondary-modal" (click)="cancelPreview()">⬅️ Volver</button>
+            <button class="btn-primary-modal" (click)="confirmUpload()">✓ Confirmar Carga</button>
+          </div>
+        </div>
+
+        <div class="table-container">
+          <table class="preview-table">
+            <thead>
+              <tr>
+                <th class="actions-col">Acciones</th>
+                <th *ngFor="let col of columns">{{ col }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr *ngFor="let row of previewData" [class.editing]="editingRow === row">
+                <td class="actions-cell">
+                  <button *ngIf="editingRow !== row" class="btn-icon btn-edit" (click)="startEdit(row)"
+                    title="Editar">✏️</button>
+                  <button *ngIf="editingRow === row" class="btn-icon btn-save" (click)="saveEdit()"
+                    title="Guardar">✓</button>
+                  <button *ngIf="editingRow === row" class="btn-icon btn-cancel" (click)="cancelEdit()"
+                    title="Cancelar">✗</button>
+                  <button *ngIf="editingRow !== row" class="btn-icon btn-delete" (click)="deleteRow(row)"
+                    title="Eliminar">🗑️</button>
+                </td>
+                <td *ngFor="let col of columns">
+                  <input *ngIf="editingRow === row" type="text" [(ngModel)]="row[col]" class="edit-input" />
+                  <span *ngIf="editingRow !== row">{{ row[col] ?? '-' }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- PROGRESO DE CARGA -->
+      <div *ngIf="isUploading" class="upload-progress">
+        <h4>Cargando Productos...</h4>
+
+        <div class="progress-bar-container">
+          <div class="progress-bar" [style.width.%]="uploadProgress" [style.background-color]="getProgressColor()">
+          </div>
+        </div>
+
+        <p class="progress-percentage">{{ uploadProgress }}%</p>
+        <p class="progress-message">{{ uploadMessage }}</p>
+
+        <div class="upload-stats">
+          <div class="stat-item stat-created">
+            <span class="stat-label">Creados:</span>
+            <span class="stat-value">{{ uploadStats.created }}</span>
+          </div>
+          <div class="stat-item stat-updated">
+            <span class="stat-label">Actualizados:</span>
+            <span class="stat-value">{{ uploadStats.updated }}</span>
+          </div>
+          <div class="stat-item stat-errors">
+            <span class="stat-label">Errores:</span>
+            <span class="stat-value">{{ uploadStats.errors }}</span>
+          </div>
+        </div>
+
+        <div *ngIf="uploadProgress === 100" class="success-message">
+          <div class="success-icon">✅</div>
+          <p>¡Carga completada exitosamente!</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- DIÁLOGO DE ERRORES -->
+<div *ngIf="showErrorDialog" class="error-modal-overlay" (click)="closeErrorDialog()">
+  <div class="error-modal-content" (click)="$event.stopPropagation()">
+    <div class="error-modal-header">
+      <h3>⚠️ Errores Encontrados</h3>
+      <button class="btn-close" (click)="closeErrorDialog()">✕</button>
+    </div>
+    <div class="error-modal-body">
+      <p>Se encontraron {{ errors.length }} errores durante la carga:</p>
+      <ul class="error-list">
+        <li *ngFor="let error of errors">{{ error }}</li>
+      </ul>
+    </div>
+    <div class="error-modal-footer">
+      <button class="btn-primary-modal" (click)="closeErrorDialog()">Entendido</button>
+    </div>
+  </div>
 </div>
