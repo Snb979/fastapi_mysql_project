@@ -1,6 +1,5 @@
 import { Component, OnInit, OnDestroy } from '@angular/core';
 import { ApiService } from '../core/api.service';
-import { Subject } from 'rxjs';
 
 interface SheetInfo {
   name: string;
@@ -17,6 +16,11 @@ interface PreviewRow {
   price: number;
   quantity: number;
   id?: number;
+  status?: string; // 'new', 'duplicate', 'error'
+  status_label?: string;
+  existing_id?: number;
+  existing_data?: any;
+  errors?: string[];
   [key: string]: any;
 }
 
@@ -34,47 +38,43 @@ interface UploadProgress {
   styleUrls: ['./inventory.component.scss']
 })
 export class InventoryComponent implements OnInit, OnDestroy {
-  items: any[] = []; // Lista completa de productos
-  filteredItems: any[] = []; // Lista filtrada (búsqueda)
-  paginatedItems: any[] = []; // Lista visible por página
+  items: any[] = [];
+  filteredItems: any[] = [];
+  paginatedItems: any[] = [];
   newItem = { name: '', description: '', price: 0, quantity: 0 };
 
-  // 🔹 Paginación
   currentPage = 1;
   itemsPerPage = 5;
-
-  // 🔹 Búsqueda
   searchTerm = '';
 
-  private destroy$ = new Subject<void>();
   private ws: WebSocket | null = null;
   private wsUrl = 'ws://localhost:8000/ws/upload';
 
-  // Estado del modal
   showExcelModal = false;
-
-  // Archivo
   selectedFile: File | null = null;
   fileName: string = '';
   fileSize: number = 0;
 
-  // Análisis de hojas
   sheets: SheetInfo[] = [];
   selectedSheet: string = '';
   showSheetSelector: boolean = false;
 
-  // Vista previa
   showPreview: boolean = false;
   previewData: PreviewRow[] = [];
   originalPreviewData: PreviewRow[] = [];
   totalRows: number = 0;
   columns: string[] = [];
 
-  // Edición
+  // Nuevos campos para duplicados
+  hasDuplicates: boolean = false;
+  duplicatesCount: number = 0;
+  newProductsCount: number = 0;
+  showDuplicatesModal: boolean = false;
+  selectedDuplicateAction: string = 'skip'; // 'skip', 'update', 'create_new'
+
   editingRow: PreviewRow | null = null;
   editingRowCopy: PreviewRow | null = null;
 
-  // Progreso
   isUploading: boolean = false;
   uploadProgress: number = 0;
   uploadMessage: string = '';
@@ -82,35 +82,32 @@ export class InventoryComponent implements OnInit, OnDestroy {
   uploadStats = {
     created: 0,
     updated: 0,
+    skipped: 0,
     errors: 0
   };
 
-  // Errores
   errors: string[] = [];
   showErrorDialog: boolean = false;
   generalError: string = '';
 
-  constructor(private api: ApiService) { }
+  constructor(private api: ApiService) {}
 
   ngOnInit() {
-    this.loadItems(); // Cargar productos al iniciar la página
+    this.loadItems();
     this.connectWebSocket();
   }
 
   ngOnDestroy(): void {
-    this.destroy$.next();
-    this.destroy$.complete();
     this.closeWebSocket();
   }
 
-  // Cargar todos los productos desde el backend
   loadItems() {
     this.api.getItems().subscribe({
       next: (response: any) => {
         console.log('Respuesta del backend:', response);
         this.items = response.data || [];
         this.filteredItems = [...this.items];
-        this.updatePaginatedItems(); // Inicializa la primera página
+        this.updatePaginatedItems();
       },
       error: (error) => {
         console.error('Error al cargar productos:', error);
@@ -121,9 +118,27 @@ export class InventoryComponent implements OnInit, OnDestroy {
     });
   }
 
-  // Agregar un nuevo producto
+// Agregar esta propiedad en la clase
+duplicateWarning: string = '';
+
   addItem() {
     if (!this.newItem.name || !this.newItem.description) return;
+    
+    const nameToCheck = this.newItem.name.toLowerCase().trim();
+    const existingProduct = this.items.find(item => 
+      item.name.toLowerCase().trim() === nameToCheck
+    );
+    
+    if (existingProduct) {
+      this.duplicateWarning = `⚠️ Ya existe "${existingProduct.name}" con precio $${existingProduct.price}`;
+      
+      setTimeout(() => {
+        this.duplicateWarning = '';
+      }, 5000);
+      
+      return; // No permitir agregar duplicados
+    }
+    
     this.api.addItem(this.newItem).subscribe({
       next: () => {
         this.newItem = { name: '', description: '', price: 0, quantity: 0 };
@@ -135,9 +150,11 @@ export class InventoryComponent implements OnInit, OnDestroy {
       }
     });
   }
-
-  // Eliminar un producto
   deleteItem(id: number) {
+    if (!confirm('¿Estás seguro de eliminar este producto?')) {
+      return;
+    }
+    
     this.api.deleteItem(id).subscribe({
       next: () => {
         this.loadItems();
@@ -145,11 +162,10 @@ export class InventoryComponent implements OnInit, OnDestroy {
       },
       error: (error) => {
         console.error('Error al eliminar producto:', error);
+        this.showError('Error al eliminar el producto');
       }
     });
   }
-
-  // Filtro de búsqueda
   applyFilter(): void {
     const term = (this.searchTerm || '').toLowerCase().trim();
 
@@ -166,14 +182,12 @@ export class InventoryComponent implements OnInit, OnDestroy {
     this.updatePaginatedItems();
   }
 
-  // Actualizar los ítems visibles según la página actual
   updatePaginatedItems() {
     const start = (this.currentPage - 1) * this.itemsPerPage;
     const end = start + this.itemsPerPage;
     this.paginatedItems = this.filteredItems.slice(start, end);
   }
 
-  // Paginación
   totalPages() {
     return Math.ceil(this.filteredItems.length / this.itemsPerPage);
   }
@@ -199,9 +213,39 @@ export class InventoryComponent implements OnInit, OnDestroy {
     }
   }
 
-  // ========================================
-  // Carga de Excel
-  // ========================================
+  getPageNumbers(): number[] {
+    const total = this.totalPages();
+    const current = this.currentPage;
+    const pages: number[] = [];
+
+    if (total <= 7) {
+      for (let i = 1; i <= total; i++) {
+        pages.push(i);
+      }
+    } else {
+      pages.push(1);
+
+      if (current > 3) {
+        pages.push(-1);
+      }
+
+      const start = Math.max(2, current - 1);
+      const end = Math.min(total - 1, current + 1);
+
+      for (let i = start; i <= end; i++) {
+        pages.push(i);
+      }
+
+      if (current < total - 2) {
+        pages.push(-1);
+      }
+
+      pages.push(total);
+    }
+
+    return pages;
+  }
+
   openExcelUploader() {
     this.showExcelModal = true;
     this.resetUploadState();
@@ -211,8 +255,6 @@ export class InventoryComponent implements OnInit, OnDestroy {
     this.showExcelModal = false;
     this.resetUploadState();
   }
-
-  // ========== WEBSOCKET ==========
 
   connectWebSocket(): void {
     try {
@@ -252,14 +294,15 @@ export class InventoryComponent implements OnInit, OnDestroy {
   }
 
   handleWebSocketMessage(data: UploadProgress): void {
-    this.uploadProgress = data.progress;
-    this.uploadMessage = data.message;
-    this.uploadStep = data.step;
+    this.uploadProgress = Number(data.progress) || 0;
+    this.uploadMessage = data.message || '';
+    this.uploadStep = data.step || '';
 
     if (data.data) {
       this.uploadStats = {
         created: data.data.created || 0,
         updated: data.data.updated || 0,
+        skipped: data.data.skipped || 0,
         errors: data.data.errors_count || data.data.errors || 0
       };
 
@@ -275,10 +318,8 @@ export class InventoryComponent implements OnInit, OnDestroy {
         this.showErrorDialog = true;
       }
 
-      // Recargar la lista de productos
       this.loadItems();
 
-      // Cerrar modal después de 3 segundos
       setTimeout(() => {
         if (this.errors.length === 0) {
           this.closeExcelModal();
@@ -291,8 +332,6 @@ export class InventoryComponent implements OnInit, OnDestroy {
       this.showError(data.message);
     }
   }
-
-  // ========== MANEJO DE ARCHIVO ==========
 
   onFileSelected(event: any): void {
     const file = event.target.files[0];
@@ -338,13 +377,13 @@ export class InventoryComponent implements OnInit, OnDestroy {
             this.showSheetSelector = true;
             if (response.data.selected_sheet) {
               this.selectedSheet = response.data.selected_sheet;
-              this.loadPreview();
+              this.loadPreviewWithDuplicates();
             }
           } else if (response.data.total_sheets === 1) {
             const sheet = this.sheets[0];
             if (sheet.is_valid) {
               this.selectedSheet = sheet.name;
-              this.loadPreview();
+              this.loadPreviewWithDuplicates();
             } else {
               this.showError(`La hoja "${sheet.name}" tiene errores: ${sheet.errors.join(', ')}`);
             }
@@ -366,24 +405,46 @@ export class InventoryComponent implements OnInit, OnDestroy {
     }
 
     this.selectedSheet = sheetName;
-    this.loadPreview();
+    this.loadPreviewWithDuplicates();
   }
 
-  loadPreview(): void {
+  // NUEVO: Cargar preview con validación de duplicados
+  loadPreviewWithDuplicates(): void {
     if (!this.selectedFile || !this.selectedSheet) return;
 
     const formData = new FormData();
     formData.append('file', this.selectedFile);
 
-    this.api.previewExcel(formData, this.selectedSheet).subscribe({
+    this.api.validateDuplicates(formData, this.selectedSheet).subscribe({
       next: (response) => {
         if (response.success) {
           this.previewData = response.data.preview_rows;
           this.originalPreviewData = JSON.parse(JSON.stringify(response.data.preview_rows));
           this.totalRows = response.data.total_rows;
-          this.columns = response.data.columns.filter((col: string) => col !== 'temp_id');
+          this.columns = response.data.columns.filter((col: string) => 
+            col !== 'temp_id' && col !== 'status' && col !== 'status_label' && 
+            col !== 'existing_id' && col !== 'existing_data' && col !== 'errors'
+          );
+          
+          // Información de duplicados
+          this.hasDuplicates = response.data.has_duplicates;
+          this.duplicatesCount = response.data.duplicates_found;
+          this.newProductsCount = response.data.new_products;
+
+          console.log('✅ Duplicados encontrados:', this.duplicatesCount);
+          console.log('✅ Nuevos productos:', this.newProductsCount);
+          console.log('✅ Has duplicates:', this.hasDuplicates);
+          
           this.showPreview = true;
           this.showSheetSelector = false;
+
+          // Si hay duplicados, mostrar modal de opciones
+          if (this.hasDuplicates) {
+            console.log('🚨 Mostrando modal de duplicados');
+            this.showDuplicatesModal = true;
+          } else {
+            console.log('ℹ️ No hay duplicados, no se muestra modal');
+          }
         }
       },
       error: (error) => {
@@ -392,7 +453,20 @@ export class InventoryComponent implements OnInit, OnDestroy {
     });
   }
 
-  // ========== EDICIÓN ==========
+  // NUEVO: Métodos para manejar duplicados
+  selectDuplicateAction(action: string): void {
+    this.selectedDuplicateAction = action;
+  }
+
+  closeDuplicatesModal(): void {
+    this.showDuplicatesModal = false;
+  }
+
+  proceedWithDuplicates(): void {
+    this.showDuplicatesModal = false;
+    // El usuario puede continuar editando el preview
+  }
+
   startEdit(row: PreviewRow): void {
     this.editingRow = row;
     this.editingRowCopy = { ...row };
@@ -416,10 +490,27 @@ export class InventoryComponent implements OnInit, OnDestroy {
     if (index > -1) {
       this.previewData.splice(index, 1);
       this.totalRows--;
+      
+      // Recalcular duplicados
+      if (row.status === 'duplicate') {
+        this.duplicatesCount--;
+        if (this.duplicatesCount === 0) {
+          this.hasDuplicates = false;
+        }
+      } else if (row.status === 'new') {
+        this.newProductsCount--;
+      }
     }
   }
 
-  // ========== CARGA ==========
+  // Método para obtener la clase CSS según el estado
+  getRowClass(row: PreviewRow): string {
+    if (row.status === 'duplicate') return 'row-duplicate';
+    if (row.status === 'error') return 'row-error';
+    if (row.status === 'new') return 'row-new';
+    return '';
+  }
+
   confirmUpload(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       this.showError('No hay conexión con el servidor. Reintentando...');
@@ -432,11 +523,13 @@ export class InventoryComponent implements OnInit, OnDestroy {
     this.uploadProgress = 0;
     this.uploadMessage = 'Iniciando carga...';
     this.errors = [];
-    this.uploadStats = { created: 0, updated: 0, errors: 0 };
+    this.uploadStats = { created: 0, updated: 0, skipped: 0, errors: 0 };
 
+    // Enviar con la acción de duplicados seleccionada
     this.ws.send(JSON.stringify({
       action: 'start_upload',
-      rows: this.previewData
+      rows: this.previewData,
+      duplicate_action: this.selectedDuplicateAction
     }));
   }
 
@@ -444,14 +537,16 @@ export class InventoryComponent implements OnInit, OnDestroy {
     this.showPreview = false;
     this.previewData = [];
     this.selectedSheet = '';
+    this.hasDuplicates = false;
+    this.duplicatesCount = 0;
+    this.newProductsCount = 0;
+    
     if (this.sheets.length > 1) {
       this.showSheetSelector = true;
     } else {
       this.resetUploadState();
     }
   }
-
-  // ========== UTILIDADES ==========
 
   resetUploadState(): void {
     this.selectedFile = null;
@@ -467,10 +562,15 @@ export class InventoryComponent implements OnInit, OnDestroy {
     this.columns = [];
     this.uploadProgress = 0;
     this.uploadMessage = '';
-    this.uploadStats = { created: 0, updated: 0, errors: 0 };
+    this.uploadStats = { created: 0, updated: 0, skipped: 0, errors: 0 };
     this.errors = [];
     this.generalError = '';
     this.isUploading = false;
+    this.hasDuplicates = false;
+    this.duplicatesCount = 0;
+    this.newProductsCount = 0;
+    this.showDuplicatesModal = false;
+    this.selectedDuplicateAction = 'skip';
   }
 
   showError(message: string): void {

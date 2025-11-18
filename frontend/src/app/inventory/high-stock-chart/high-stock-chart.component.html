@@ -1,0 +1,18 @@
+<div class="chart-container">
+  <div *ngIf="loading" class="chart-loading">
+    <p>⏳ Cargando datos...</p>
+  </div>
+
+  <div *ngIf="error" class="chart-error">
+    <p>{{ error }}</p>
+    <button (click)="reloadData()" class="btn-reload">🔄 Reintentar</button>
+  </div>
+
+  <div *ngIf="noData && !loading" class="chart-no-data">
+    <p>📊 No hay suficientes productos para mostrar</p>
+  </div>
+
+  <div *ngIf="!loading && !error && !noData" class="chart-wrapper">
+    <canvas #chartCanvas></canvas>
+  </div>
+</div>

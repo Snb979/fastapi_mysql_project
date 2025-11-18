@@ -1,0 +1,46 @@
+.chart-container {
+  background: white;
+  border-radius: 12px;
+  padding: 20px;
+  margin: 20px 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.chart-wrapper {
+  position: relative;
+  height: 400px;
+  width: 100%;
+}
+
+.chart-loading,
+.chart-error,
+.chart-no-data {
+  text-align: center;
+  padding: 40px 20px;
+  font-size: 16px;
+  color: #666;
+}
+
+.chart-error {
+  color: #e74c3c;
+  
+  button {
+    margin-top: 10px;
+    padding: 8px 16px;
+    background: #e74c3c;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    
+    &:hover {
+      background: #c0392b;
+    }
+  }
+}
+
+.chart-no-data {
+  color: #27ae60;
+  font-weight: 600;
+}

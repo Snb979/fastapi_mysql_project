@@ -123,7 +123,47 @@ def filter_products(min_price: float, db: Session = Depends(get_db)):
             message="No se pudo filtrar productos",
             error=str(e)
         )
-
+@app.get("/products/low-stock", response_model=dict)
+def get_low_stock_products(threshold: int = 10, db: Session = Depends(get_db)):
+    """
+    Obtiene productos con stock bajo (por defecto menos de 10 unidades)
+    """
+    try:
+        products = db.query(Product).filter(Product.quantity < threshold).order_by(Product.quantity.asc()).all()
+        serialized = [ProductOut.from_orm(p) for p in products]
+        return build_response(
+            title="Productos con bajo stock",
+            message=f"Se encontraron {len(products)} productos con menos de {threshold} unidades",
+            data=serialized
+        )
+    except Exception as e:
+        return build_response(
+            type_="error",
+            title="Error al obtener productos",
+            message="No se pudo obtener el listado",
+            error=str(e)
+        )
+        
+@app.get("/products/high-stock", response_model=dict)
+def get_high_stock_products(limit: int = 5, db: Session = Depends(get_db)):
+    """
+    Obtiene los productos con mayor stock
+    """
+    try:
+        products = db.query(Product).order_by(Product.quantity.desc()).limit(limit).all()
+        serialized = [ProductOut.from_orm(p) for p in products]
+        return build_response(
+            title="Productos con mayor stock",
+            message=f"Se encontraron {len(products)} productos con mayor cantidad",
+            data=serialized
+        )
+    except Exception as e:
+        return build_response(
+            type_="error",
+            title="Error al obtener productos",
+            message="No se pudo obtener el listado",
+            error=str(e)
+        )
 # Obtener producto por ID
 @app.get("/products/{product_id}", response_model=dict)
 def read_product(product_id: int, db: Session = Depends(get_db)):
@@ -386,6 +426,91 @@ async def preview_excel(file: UploadFile = File(...), sheet_name: str = None):
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error generando vista previa: {str(e)}")
+    
+    
+@app.post("/upload-excel/validate-duplicates")
+async def validate_duplicates(file: UploadFile = File(...), sheet_name: str = None, db: Session = Depends(get_db)):
+    print("🔍 VALIDACIÓN DE DUPLICADOS INICIADA")
+    
+    contents = await file.read()
+    excel_file = io.BytesIO(contents)
+    
+    try:
+        if sheet_name:
+            df = pd.read_excel(excel_file, sheet_name=sheet_name, engine='openpyxl')
+        else:
+            df = pd.read_excel(excel_file, engine='openpyxl')
+        
+        df = normalize_columns(df)
+        df.insert(0, 'temp_id', range(1, len(df) + 1))
+        
+        # Obtener productos existentes en BD
+        existing_products = db.query(Product).all()
+        existing_names = {p.name.lower().strip(): p for p in existing_products}
+        
+        print(f"💾 Productos en BD: {len(existing_products)}")
+        
+        preview_data = []
+        duplicates_found = 0
+        new_products = 0
+        
+        # ⬇️ NUEVO: Rastrear nombres ya vistos en el Excel
+        seen_in_excel = {}
+        
+        for idx, row in df.iterrows():
+            row_dict = row.to_dict()
+            
+            for key, value in row_dict.items():
+                if pd.isna(value):
+                    row_dict[key] = None
+            
+            name = str(row_dict.get('name', '')).strip()
+            name_lower = name.lower()
+            
+            # ⬇️ NUEVO: Verificar si es duplicado DENTRO del Excel
+            if name_lower in seen_in_excel:
+                row_dict['status'] = 'duplicate_excel'
+                row_dict['status_label'] = 'Duplicado en Excel'
+                row_dict['existing_id'] = None
+                row_dict['duplicate_row'] = seen_in_excel[name_lower]
+                duplicates_found += 1
+                print(f"⚠️  DUPLICADO EN EXCEL: {name} (fila {seen_in_excel[name_lower] + 2})")
+            
+            # Verificar si es duplicado con la BD
+            elif name_lower in existing_names:
+                existing_product = existing_names[name_lower]
+                row_dict['status'] = 'duplicate'
+                row_dict['status_label'] = 'Duplicado en BD'
+                row_dict['existing_id'] = existing_product.id
+                duplicates_found += 1
+                print(f"⚠️  DUPLICADO EN BD: {name}")
+            
+            # Es nuevo
+            else:
+                row_dict['status'] = 'new'
+                row_dict['status_label'] = 'Nuevo'
+                new_products += 1
+                # Registrar este nombre como visto
+                seen_in_excel[name_lower] = idx
+            
+            preview_data.append(row_dict)
+        
+        print(f"📊 Duplicados: {duplicates_found}, Nuevos: {new_products}")
+        
+        return {
+            "success": True,
+            "data": {
+                "preview_rows": preview_data,
+                "total_rows": len(df),
+                "columns": list(df.columns),
+                "duplicates_found": duplicates_found,
+                "new_products": new_products,
+                "has_duplicates": duplicates_found > 0
+            }
+        }
+    except Exception as e:
+        print(f"❌ ERROR: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Error: {str(e)}")
 
 # ========================================
 # WEBSOCKET PARA CARGA EN TIEMPO REAL
@@ -417,9 +542,10 @@ async def websocket_upload(websocket: WebSocket):
         manager.disconnect(websocket)
 
 async def process_upload(websocket: WebSocket, data: dict):
-    """Procesa la carga de datos con notificaciones en tiempo real Y GUARDADO EN BD"""
+    """Procesa la carga de datos con validación de duplicados"""
     
     rows = data.get('rows', [])
+    duplicate_action = data.get('duplicate_action', 'skip')  # skip, update, create_new
     total_rows = len(rows)
     
     if total_rows == 0:
@@ -429,7 +555,6 @@ async def process_upload(websocket: WebSocket, data: dict):
         })
         return
     
-    # Obtener sesión de base de datos
     db = SessionLocal()
     
     try:
@@ -441,22 +566,23 @@ async def process_upload(websocket: WebSocket, data: dict):
             "message": f"Iniciando carga de {total_rows} productos"
         })
         
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
         
-        # Simular validación
+        # Validación
         await manager.send_message(websocket, {
             "type": "progress",
             "step": "validating",
             "progress": 10,
-            "message": "Validando datos..."
+            "message": "Validando datos y detectando duplicados..."
         })
         
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
         
         # Procesar por lotes
         batch_size = 10
         created = 0
         updated = 0
+        skipped = 0
         errors = []
         
         for i in range(0, total_rows, batch_size):
@@ -494,39 +620,39 @@ async def process_upload(websocket: WebSocket, data: dict):
                         errors.append(f"Fila {i+idx+1}: Cantidad inválida")
                         continue
                     
-                    # ✅ AQUÍ GUARDAMOS EN LA BASE DE DATOS
-                    product_id = row.get('id')
+                    # Verificar si es duplicado
+                    existing_product = db.query(Product).filter(
+                        Product.name.ilike(name)
+                    ).first()
                     
-                    if product_id:
-                        # Intentar actualizar producto existente
-                        try:
-                            product_id = int(product_id)
-                            product = db.query(Product).filter(Product.id == product_id).first()
-                            
-                            if product:
-                                # Actualizar producto existente
-                                product.name = name
-                                product.description = description
-                                product.price = price
-                                product.quantity = quantity
-                                updated += 1
-                                print(f"✓ Producto ID {product_id} actualizado: {name}")
-                            else:
-                                # Crear nuevo si el ID no existe
-                                new_product = Product(
-                                    name=name,
-                                    description=description,
-                                    price=price,
-                                    quantity=quantity
-                                )
-                                db.add(new_product)
-                                created += 1
-                                print(f"✓ Producto creado: {name} (ID {product_id} no existía)")
-                        except ValueError:
-                            errors.append(f"Fila {i+idx+1}: ID inválido")
+                    if existing_product:
+                        # Es un duplicado
+                        if duplicate_action == 'skip':
+                            skipped += 1
+                            print(f"⊘ Producto duplicado saltado: {name}")
                             continue
+                        
+                        elif duplicate_action == 'update':
+                            # Actualizar producto existente
+                            existing_product.description = description
+                            existing_product.price = price
+                            existing_product.quantity = quantity
+                            updated += 1
+                            print(f"↻ Producto actualizado: {name}")
+                        
+                        elif duplicate_action == 'create_new':
+                            # Crear como producto nuevo (aunque el nombre sea igual)
+                            new_product = Product(
+                                name=name,
+                                description=description,
+                                price=price,
+                                quantity=quantity
+                            )
+                            db.add(new_product)
+                            created += 1
+                            print(f"+ Producto duplicado creado como nuevo: {name}")
                     else:
-                        # Crear nuevo producto
+                        # Producto nuevo
                         new_product = Product(
                             name=name,
                             description=description,
@@ -535,22 +661,21 @@ async def process_upload(websocket: WebSocket, data: dict):
                         )
                         db.add(new_product)
                         created += 1
-                        print(f"✓ Producto creado: {name}")
+                        print(f"✓ Producto nuevo creado: {name}")
                     
-                    # Hacer commit cada 10 productos para mayor eficiencia
+                    # Commit cada 10 productos
                     if (created + updated) % 10 == 0:
                         db.commit()
-                        print(f"💾 Guardados {created + updated} productos hasta ahora")
                     
                 except Exception as e:
                     errors.append(f"Fila {i+idx+1}: {str(e)}")
                     print(f"❌ Error en fila {i+idx+1}: {str(e)}")
                     continue
             
-            # Commit del lote actual
+            # Commit del lote
             db.commit()
             
-            # Notificar progreso del lote
+            # Notificar progreso
             progress = min(10 + int((i + batch_size) / total_rows * 80), 90)
             await manager.send_message(websocket, {
                 "type": "progress",
@@ -560,23 +685,24 @@ async def process_upload(websocket: WebSocket, data: dict):
                 "data": {
                     "created": created,
                     "updated": updated,
+                    "skipped": skipped,
                     "errors": len(errors)
                 }
             })
         
-        # Commit final para asegurar que todo se guardó
+        # Commit final
         db.commit()
-        print(f"✅ Proceso completado: {created} creados, {updated} actualizados")
+        print(f"✅ Proceso completado: {created} creados, {updated} actualizados, {skipped} saltados")
         
         # Finalizar
         await manager.send_message(websocket, {
             "type": "progress",
             "step": "saving",
             "progress": 95,
-            "message": "Guardando cambios en la base de datos..."
+            "message": "Guardando cambios..."
         })
         
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(0.3)
         
         # Resultado final
         await manager.send_message(websocket, {
@@ -588,18 +714,20 @@ async def process_upload(websocket: WebSocket, data: dict):
                 "total_rows": total_rows,
                 "created": created,
                 "updated": updated,
+                "skipped": skipped,
                 "errors_count": len(errors),
-                "errors": errors[:10]  # Primeros 10 errores
+                "errors": errors[:10]
             }
         })
     
     except Exception as e:
         db.rollback()
-        print(f"❌ Error general en process_upload: {str(e)}")
+        print(f"❌ Error: {str(e)}")
         await manager.send_message(websocket, {
             "type": "error",
-            "message": f"Error procesando datos: {str(e)}"
+            "message": f"Error: {str(e)}"
         })
+    
     
     finally:
         db.close()

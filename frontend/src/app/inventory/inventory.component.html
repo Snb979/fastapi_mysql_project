@@ -1,13 +1,19 @@
-<!-- inventory.component.html - VERSIÓN INTEGRADA -->
+<!-- inventory.component.html - VERSIÓN COMPLETA CON DUPLICADOS -->
 <div class="container">
   <h2>📦 Inventario de Productos</h2>
 
+  <!-- 🔥 GRÁFICO DE BAJO STOCK -->
+  <app-low-stock-chart></app-low-stock-chart>
+
+  <app-high-stock-chart></app-high-stock-chart>
+  
   <!-- Formulario de Agregar Producto -->
-  <form (ngSubmit)="addItem()" class="form">
+  <form (ngSubmit)="addItem()" class="form"> 
     <input [(ngModel)]="newItem.name" name="name" placeholder="Nombre del producto" required />
     <input [(ngModel)]="newItem.description" name="description" placeholder="Descripción" required />
     <input [(ngModel)]="newItem.price" name="price" type="number" placeholder="Precio" required />
     <input [(ngModel)]="newItem.quantity" name="quantity" type="number" placeholder="Cantidad" required />
+    
     <button type="submit" class="btn-add">➕ Agregar</button>
     <button type="button" class="btn-excel" (click)="openExcelUploader()">
       📊 Carga Masiva Excel
@@ -19,7 +25,11 @@
     <input name="search" [(ngModel)]="searchTerm" placeholder="🔍 Buscar producto..." />
     <button type="button" (click)="applyFilter()">Buscar</button>
   </div>
-
+  <!-- Después del formulario -->
+  <div *ngIf="duplicateWarning" class="alert alert-warning">
+    <span class="alert-icon">⚠️</span>
+    <span>{{ duplicateWarning }}</span>
+  </div>
   <!-- Lista de Productos -->
   <ul class="item-list">
     <li *ngFor="let item of paginatedItems">
@@ -37,39 +47,57 @@
     </li>
   </ul>
 
-  <!-- Paginación -->
+  <!-- Paginación Mejorada -->
   <div class="pagination">
-    <button (click)="prevPage()" [disabled]="currentPage === 1">⬅️ Anterior</button>
-    <span>Página {{currentPage}} de {{totalPages()}}</span>
-    <button (click)="nextPage()" [disabled]="currentPage === totalPages()">Siguiente ➡️</button>
+    <button 
+      (click)="prevPage()" 
+      [disabled]="currentPage === 1"
+      class="pagination-btn">
+      ⬅️ Anterior
+    </button>
+    
+    <div class="page-numbers">
+      <button 
+        *ngFor="let page of getPageNumbers()" 
+        (click)="page > 0 && goToPage(page)"
+        [class.active]="page === currentPage"
+        [class.dots]="page === -1"
+        [disabled]="page === -1"
+        class="page-number">
+        {{ page === -1 ? '...' : page }}
+      </button>
+    </div>
+    
+    <button 
+      (click)="nextPage()" 
+      [disabled]="currentPage === totalPages()"
+      class="pagination-btn">
+      Siguiente ➡️
+    </button>
   </div>
 </div>
 
-<!-- ========================================
-     MODAL DE CARGA EXCEL
-     ======================================== -->
+<!-- ============================================ -->
+<!-- MODAL DE CARGA EXCEL -->
+<!-- ============================================ -->
 <div *ngIf="showExcelModal" class="modal-overlay" (click)="closeExcelModal()">
   <div class="modal-excel" (click)="$event.stopPropagation()">
-    <!-- Header del Modal -->
     <div class="modal-excel-header">
       <h3>📊 Carga Masiva desde Excel</h3>
       <button class="btn-close-modal" (click)="closeExcelModal()">✕</button>
     </div>
 
-    <!-- Contenido del Modal -->
     <div class="modal-excel-body">
-
-      <!-- ERROR GENERAL -->
+      <!-- Alertas de Error -->
       <div *ngIf="generalError" class="alert alert-error">
         <span class="alert-icon">⚠️</span>
         <span>{{ generalError }}</span>
       </div>
 
-      <!-- SELECTOR DE ARCHIVO -->
+      <!-- ZONA DE CARGA DE ARCHIVO -->
       <div *ngIf="!showPreview && !isUploading && !showSheetSelector" class="upload-zone">
         <input type="file" id="fileInputModal" accept=".xls,.xlsx" (change)="onFileSelected($event)"
           style="display: none" />
-
         <label for="fileInputModal" class="upload-area">
           <div class="upload-icon">📁</div>
           <p class="upload-text">
@@ -77,7 +105,6 @@
           </p>
           <p class="upload-hint">Formatos: .xls, .xlsx (máx. 10 MB)</p>
         </label>
-
         <div *ngIf="fileName" class="file-info">
           <div class="file-icon">📄</div>
           <div class="file-details">
@@ -91,13 +118,17 @@
       <div *ngIf="showSheetSelector && !showPreview && !isUploading" class="sheet-selector">
         <h4>Selecciona una hoja para cargar</h4>
         <p class="sheet-hint">Se detectaron {{ sheets.length }} hojas en el archivo</p>
-
         <div class="sheets-grid">
-          <div *ngFor="let sheet of sheets" class="sheet-card" [class.sheet-valid]="sheet.is_valid"
-            [class.sheet-invalid]="!sheet.is_valid" (click)="sheet.is_valid && selectSheet(sheet.name)">
+          <div *ngFor="let sheet of sheets" 
+               class="sheet-card" 
+               [class.sheet-valid]="sheet.is_valid"
+               [class.sheet-invalid]="!sheet.is_valid" 
+               (click)="sheet.is_valid && selectSheet(sheet.name)">
             <div class="sheet-header">
               <span class="sheet-name">{{ sheet.name }}</span>
-              <span class="sheet-status" [class.status-valid]="sheet.is_valid" [class.status-invalid]="!sheet.is_valid">
+              <span class="sheet-status" 
+                    [class.status-valid]="sheet.is_valid" 
+                    [class.status-invalid]="!sheet.is_valid">
                 {{ sheet.is_valid ? '✓' : '✗' }}
               </span>
             </div>
@@ -112,41 +143,99 @@
         </div>
       </div>
 
-      <!-- VISTA PREVIA -->
+      <!-- VISTA PREVIA CON INDICADORES DE DUPLICADOS -->
       <div *ngIf="showPreview && !isUploading" class="preview-container">
+        <!-- Header con Estadísticas -->
         <div class="preview-header">
-          <div>
+          <div class="preview-title-section">
             <h4>Vista Previa - {{ selectedSheet }}</h4>
             <p class="preview-info">Mostrando {{ previewData.length }} de {{ totalRows }} filas</p>
+            
+            <!-- Estadísticas de Duplicados -->
+            <div *ngIf="hasDuplicates || newProductsCount > 0" class="preview-stats">
+              <span class="stat-badge stat-new" *ngIf="newProductsCount > 0">
+                ✨ {{ newProductsCount }} Nuevos
+              </span>
+              <span class="stat-badge stat-duplicate" *ngIf="duplicatesCount > 0">
+                ⚠️ {{ duplicatesCount }} Duplicados
+              </span>
+            </div>
           </div>
+
           <div class="preview-actions">
             <button class="btn-secondary-modal" (click)="cancelPreview()">⬅️ Volver</button>
             <button class="btn-primary-modal" (click)="confirmUpload()">✓ Confirmar Carga</button>
           </div>
         </div>
 
+        <!-- Leyenda de Colores -->
+        <div class="preview-legend">
+          <span class="legend-item">
+            <span class="legend-color legend-new"></span>
+            Producto nuevo
+          </span>
+          <span class="legend-item">
+            <span class="legend-color legend-duplicate"></span>
+            Producto duplicado
+          </span>
+          <span class="legend-item">
+            <span class="legend-color legend-error"></span>
+            Error de validación
+          </span>
+        </div>
+
+        <!-- Tabla de Preview -->
         <div class="table-container">
           <table class="preview-table">
             <thead>
               <tr>
+                <th class="status-col">Estado</th>
                 <th class="actions-col">Acciones</th>
                 <th *ngFor="let col of columns">{{ col }}</th>
               </tr>
             </thead>
             <tbody>
-              <tr *ngFor="let row of previewData" [class.editing]="editingRow === row">
-                <td class="actions-cell">
-                  <button *ngIf="editingRow !== row" class="btn-icon btn-edit" (click)="startEdit(row)"
-                    title="Editar">✏️</button>
-                  <button *ngIf="editingRow === row" class="btn-icon btn-save" (click)="saveEdit()"
-                    title="Guardar">✓</button>
-                  <button *ngIf="editingRow === row" class="btn-icon btn-cancel" (click)="cancelEdit()"
-                    title="Cancelar">✗</button>
-                  <button *ngIf="editingRow !== row" class="btn-icon btn-delete" (click)="deleteRow(row)"
-                    title="Eliminar">🗑️</button>
+              <tr *ngFor="let row of previewData" 
+                  [class.editing]="editingRow === row"
+                  [ngClass]="getRowClass(row)">
+                
+                <!-- Columna de Estado -->
+                <td class="status-cell">
+                  <span class="status-badge" [ngClass]="'badge-' + row.status">
+                    {{ row.status_label || '-' }}
+                  </span>
+                  <span *ngIf="row.status === 'duplicate'" class="duplicate-info" 
+                        [title]="'ID existente: ' + row.existing_id">
+                    🔗
+                  </span>
                 </td>
+
+                <!-- Columna de Acciones -->
+                <td class="actions-cell">
+                  <button *ngIf="editingRow !== row" 
+                          class="btn-icon btn-edit" 
+                          (click)="startEdit(row)"
+                          title="Editar">✏️</button>
+                  <button *ngIf="editingRow === row" 
+                          class="btn-icon btn-save" 
+                          (click)="saveEdit()"
+                          title="Guardar">✓</button>
+                  <button *ngIf="editingRow === row" 
+                          class="btn-icon btn-cancel" 
+                          (click)="cancelEdit()"
+                          title="Cancelar">✗</button>
+                  <button *ngIf="editingRow !== row" 
+                          class="btn-icon btn-delete" 
+                          (click)="deleteRow(row)"
+                          title="Eliminar">🗑️</button>
+                </td>
+
+                <!-- Columnas de Datos -->
                 <td *ngFor="let col of columns">
-                  <input *ngIf="editingRow === row" type="text" [(ngModel)]="row[col]" class="edit-input" />
+                  <input *ngIf="editingRow === row" 
+                         type="text" 
+                         [(ngModel)]="row[col]" 
+                         class="edit-input" />
                   <span *ngIf="editingRow !== row">{{ row[col] ?? '-' }}</span>
                 </td>
               </tr>
@@ -160,7 +249,9 @@
         <h4>Cargando Productos...</h4>
 
         <div class="progress-bar-container">
-          <div class="progress-bar" [style.width.%]="uploadProgress" [style.background-color]="getProgressColor()">
+          <div class="progress-bar" 
+               [style.width.%]="uploadProgress" 
+               [style.background-color]="getProgressColor()">
           </div>
         </div>
 
@@ -176,6 +267,10 @@
             <span class="stat-label">Actualizados:</span>
             <span class="stat-value">{{ uploadStats.updated }}</span>
           </div>
+          <div class="stat-item stat-skipped">
+            <span class="stat-label">Omitidos:</span>
+            <span class="stat-value">{{ uploadStats.skipped }}</span>
+          </div>
           <div class="stat-item stat-errors">
             <span class="stat-label">Errores:</span>
             <span class="stat-value">{{ uploadStats.errors }}</span>
@@ -187,12 +282,87 @@
           <p>¡Carga completada exitosamente!</p>
         </div>
       </div>
-
     </div>
   </div>
 </div>
 
-<!-- DIÁLOGO DE ERRORES -->
+<!-- ============================================ -->
+<!-- MODAL DE OPCIONES PARA DUPLICADOS -->
+<!-- ============================================ -->
+<div *ngIf="showDuplicatesModal" class="modal-overlay" (click)="closeDuplicatesModal()">
+  <div class="modal-duplicates" (click)="$event.stopPropagation()">
+    <div class="modal-duplicates-header">
+      <h3>⚠️ Productos Duplicados Detectados</h3>
+    </div>
+
+    <div class="modal-duplicates-body">
+      <p class="duplicates-message">
+        Se encontraron <strong>{{ duplicatesCount }}</strong> productos que ya existen en la base de datos.
+      </p>
+      <p class="duplicates-hint">
+        También hay <strong>{{ newProductsCount }}</strong> productos nuevos que se agregarán.
+      </p>
+
+      <div class="duplicates-options">
+        <h4>¿Cómo deseas manejar los duplicados?</h4>
+        
+        <label class="option-card" 
+               [class.selected]="selectedDuplicateAction === 'skip'">
+          <input type="radio" 
+                 name="duplicateAction" 
+                 value="skip" 
+                 [(ngModel)]="selectedDuplicateAction" />
+          <div class="option-content">
+            <span class="option-icon">⊘</span>
+            <div class="option-text">
+              <strong>Omitir duplicados</strong>
+              <p>Los productos duplicados NO se cargarán. Solo se agregarán los nuevos.</p>
+            </div>
+          </div>
+        </label>
+
+        <label class="option-card" 
+               [class.selected]="selectedDuplicateAction === 'update'">
+          <input type="radio" 
+                 name="duplicateAction" 
+                 value="update" 
+                 [(ngModel)]="selectedDuplicateAction" />
+          <div class="option-content">
+            <span class="option-icon">↻</span>
+            <div class="option-text">
+              <strong>Actualizar existentes</strong>
+              <p>Los productos duplicados se actualizarán con los nuevos datos del Excel.</p>
+            </div>
+          </div>
+        </label>
+
+        <label class="option-card" 
+               [class.selected]="selectedDuplicateAction === 'create_new'">
+          <input type="radio" 
+                 name="duplicateAction" 
+                 value="create_new" 
+                 [(ngModel)]="selectedDuplicateAction" />
+          <div class="option-content">
+            <span class="option-icon">➕</span>
+            <div class="option-text">
+              <strong>Crear como nuevos</strong>
+              <p>Los productos duplicados se crearán como registros nuevos (permite duplicados).</p>
+            </div>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <div class="modal-duplicates-footer">
+      <button class="btn-secondary-modal" (click)="closeDuplicatesModal()">Cancelar</button>
+      <button class="btn-primary-modal" (click)="proceedWithDuplicates()">Continuar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================ -->
+<!-- MODAL DE ERRORES -->
+<!-- ============================================ -->
 <div *ngIf="showErrorDialog" class="error-modal-overlay" (click)="closeErrorDialog()">
   <div class="error-modal-content" (click)="$event.stopPropagation()">
     <div class="error-modal-header">

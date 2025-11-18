@@ -51,4 +51,13 @@ export class ApiService {
   uploadExcel(formData: FormData): Observable<any> {
     return this.http.post(`${this.apiUrl}/upload-excel-ws/`, formData);
   }
+
+    /**
+   * Valida duplicados en el Excel antes de cargar
+   */
+  validateDuplicates(formData: FormData, sheetName: string): Observable<any> {
+    const params = sheetName ? `?sheet_name=${encodeURIComponent(sheetName)}` : '';
+    return this.http.post(`${this.apiUrl}/upload-excel/validate-duplicates${params}`, formData);
+  }
+
 }
